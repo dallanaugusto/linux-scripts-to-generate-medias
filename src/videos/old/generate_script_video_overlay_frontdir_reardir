@@ -1,0 +1,86 @@
+#!/bin/bash
+
+FRONT_DIR=$1
+REAR_DIR=$2
+OVERLAYED_PARENT_DIR=$3
+BASE_DATE=$4
+REAR_VIDEO_HEIGHT=$5
+
+EXPECTED_ARGS=5
+
+if [ $# -ne $EXPECTED_ARGS ]; then
+  echo "Usage: $0 <front_dir> <rear_dir> <overlayed_parent_dir> <base_date> <rear_video_height>"
+  exit 1
+fi
+
+OVERLAYED_DIR=${OVERLAYED_PARENT_DIR}/${BASE_DATE}
+
+mkdir -p ${OVERLAYED_DIR}
+
+LIST_OF_COMMANDS_FILE="${OVERLAYED_DIR}/list.sh"
+touch ${LIST_OF_COMMANDS_FILE}
+chmod +x ${LIST_OF_COMMANDS_FILE}
+echo "#!/bin/bash" >> ${LIST_OF_COMMANDS_FILE}
+echo ""  >> ${LIST_OF_COMMANDS_FILE}
+
+FRONT_FILE_MASK="${BASE_DATE}*.mp4"
+
+NUM_OF_FILES=0
+REAR_NOT_FOUND=0
+# Loop through files in the target directory
+for FRONT_FILE_PATH in "${FRONT_DIR}"/${FRONT_FILE_MASK}; do
+    # Check if the current item is a regular file
+    if [ -f "$FRONT_FILE_PATH" ]; then
+        FRONT_FILENAME=$(basename -- "${FRONT_FILE_PATH}")
+    
+        TIMESTAMP_WITH_SECONDS=${FRONT_FILENAME:0:14}
+        TIMESTAMP_WITH_SECONDS_MASK="${TIMESTAMP_WITH_SECONDS}*.mp4"
+    
+        TIMESTAMP_WITH_MINUTES=${FRONT_FILENAME:0:12}
+        TIMESTAMP_WITH_MINUTES_MASK="${TIMESTAMP_WITH_MINUTES}*.mp4"
+    
+    	FRONT_VIDEO="${FRONT_DIR}/${FRONT_FILENAME}"
+    	REAR_VIDEO=""
+    	OVERLAYED_VIDEO="${OVERLAYED_DIR}/${TIMESTAMP_WITH_SECONDS}.mp4"
+    	
+	for REAR_WITH_SECONDS_FILE_PATH in "${REAR_DIR}"/${TIMESTAMP_WITH_SECONDS_MASK}; do
+		if [ -f "$REAR_WITH_SECONDS_FILE_PATH" ]; then
+    			REAR_WITH_SECONDS_FILENAME=$(basename -- "${REAR_WITH_SECONDS_FILE_PATH}")
+			REAR_VIDEO="${REAR_DIR}/${REAR_WITH_SECONDS_FILENAME}"
+		fi
+	done
+	
+	if [[ -z "$REAR_VIDEO" ]]; then
+		for REAR_WITH_MINUTES_FILE_PATH in "${REAR_DIR}"/${TIMESTAMP_WITH_MINUTES_MASK}; do
+			if [ -f "$REAR_WITH_MINUTES_FILE_PATH" ]; then
+	    			REAR_WITH_MINUTES_FILENAME=$(basename -- "${REAR_WITH_MINUTES_FILE_PATH}")
+				REAR_VIDEO="${REAR_DIR}/${REAR_WITH_MINUTES_FILENAME}"
+			fi
+		done
+	fi
+    	
+    	if [[ -z "$REAR_VIDEO" ]]; then
+		echo "FRONT_VIDEO=${FRONT_VIDEO} - REAR_VIDEO is empty."
+		((REAR_NOT_FOUND++))
+		((NUM_OF_FILES--))
+	fi
+	
+	((NUM_OF_FILES++))
+	
+	echo "ffmpeg -i \"${FRONT_VIDEO}\" -i \"${REAR_VIDEO}\" -filter_complex \"[1:v]scale=${REAR_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10\" -crf 28 -c:a copy \"${OVERLAYED_VIDEO}"\" >> "${LIST_OF_COMMANDS_FILE}"
+    fi
+done
+
+if [ "${NUM_OF_FILES}" -eq 0 ]; then
+    echo "There are no videos to process. Exiting..."
+    rm -R ${OVERLAYED_DIR}
+    exit 1
+fi
+
+if [ "${REAR_NOT_FOUND}" -gt 0 ]; then
+    echo "Error: There are ${REAR_NOT_FOUND} not found rear videos. Aborting script."
+    exit 1
+fi
+
+echo "There are ${NUM_OF_FILES} videos to process. The SH file was generated - ${LIST_OF_COMMANDS_FILE}"
+

@@ -1,0 +1,655 @@
+#!/usr/bin/env bash
+
+# ============================================================
+# DASHCAM CONCATENATOR
+#
+# Timeline rules:
+#   - Filename timestamp is the master clock.
+#   - _0060 means an output slot of exactly 60.000 seconds.
+#   - Actual duration > nominal:
+#         trim the excess.
+#   - Actual duration < nominal:
+#         freeze the last video frame to fill the slot.
+#   - Gap between nominal slots <= STOP_THRESHOLD:
+#         no extra segment; the previous clip already occupies
+#         its complete nominal slot.
+#   - Gap > STOP_THRESHOLD:
+#         insert a short black "STOPPED FOR ..." card.
+#   - _0000:
+#         use actual media duration as the nominal duration.
+#
+# Ubuntu / GNU/Linux
+# Requires: bash, ffmpeg, ffprobe, GNU date, awk, sed, sort
+# ============================================================
+
+set -Eeuo pipefail
+
+# Always use dot as decimal separator.
+# Prevents locale-dependent problems on systems using
+# comma as the decimal separator (e.g. pt_BR).
+export LC_ALL=C
+export LANG=C
+
+# ------------------------------------------------------------
+# CONFIGURATION
+# ------------------------------------------------------------
+
+INPUT_LIST="${1:-files.txt}"
+OUTPUT="${2:-dashcam_full.mp4}"
+
+# Gaps larger than this become a STOPPED card.
+STOP_THRESHOLD=2.0
+
+# Very small differences are ignored.
+IGNORE_GAP=0.050
+
+# Duration of the visual STOPPED card.
+CARD_DURATION=3.0
+
+# H.264 encoding quality for normalized intermediate files.
+CRF=18
+PRESET="medium"
+
+# Temporary directory.
+WORKDIR="$(mktemp -d -t dashcam_concat.XXXXXXXX)"
+
+cleanup() {
+    rm -rf "$WORKDIR"
+}
+trap cleanup EXIT
+
+# ------------------------------------------------------------
+# REQUIREMENTS
+# ------------------------------------------------------------
+
+require_cmd() {
+    if ! command -v "$1" >/dev/null 2>&1; then
+        echo "ERROR: required command not found: $1" >&2
+        exit 1
+    fi
+}
+
+require_cmd ffmpeg
+require_cmd ffprobe
+require_cmd date
+require_cmd awk
+require_cmd sed
+require_cmd sort
+
+if [[ ! -f "$INPUT_LIST" ]]; then
+    echo "ERROR: input list not found: $INPUT_LIST" >&2
+    exit 1
+fi
+
+# ------------------------------------------------------------
+# READ FILE LIST
+# ------------------------------------------------------------
+
+FILES=()
+
+while IFS= read -r line || [[ -n "$line" ]]; do
+    # Remove Windows CR.
+    line="${line%$'\r'}"
+
+    # Skip blank lines.
+    [[ -z "${line//[[:space:]]/}" ]] && continue
+
+    # Skip comments.
+    [[ "$line" =~ ^[[:space:]]*# ]] && continue
+
+    # Remove leading/trailing whitespace.
+    line="$(sed 's/^[[:space:]]*//;s/[[:space:]]*$//' <<< "$line")"
+
+    [[ -z "$line" ]] && continue
+
+    FILES+=("$line")
+done < "$INPUT_LIST"
+
+if (( ${#FILES[@]} == 0 )); then
+    echo "ERROR: no files found in $INPUT_LIST" >&2
+    exit 1
+fi
+
+# Filename timestamps sort chronologically because they start
+# with YYYYMMDDHHMMSS.
+IFS=$'\n' read -r -d '' -a FILES < <(
+    printf '%s\n' "${FILES[@]}" | sort && printf '\0'
+)
+
+COUNT=${#FILES[@]}
+
+# ------------------------------------------------------------
+# HELPERS
+# ------------------------------------------------------------
+
+die() {
+    echo "ERROR: $*" >&2
+    exit 1
+}
+
+# Get actual video duration.
+#
+# Prefer video-stream duration. If unavailable, fall back to
+# container duration.
+get_video_duration() {
+    local file="$1"
+    local d
+
+    d="$(
+        ffprobe -v error \
+            -select_streams v:0 \
+            -show_entries stream=duration \
+            -of default=noprint_wrappers=1:nokey=1 \
+            "$file" 2>/dev/null || true
+    )"
+
+    if [[ -z "$d" || "$d" == "N/A" ]]; then
+        d="$(
+            ffprobe -v error \
+                -show_entries format=duration \
+                -of default=noprint_wrappers=1:nokey=1 \
+                "$file" 2>/dev/null || true
+        )"
+    fi
+
+    [[ -n "$d" && "$d" != "N/A" ]] || return 1
+
+    printf '%s\n' "$d"
+}
+
+# Parse filename:
+#
+# 20260901103651_0060.mp4
+# 20260901145627_0060_A.mp4
+#
+# Returns:
+#   start timestamp
+#   declared duration
+#
+parse_filename() {
+    local file="$1"
+    local base
+
+    base="$(basename "$file")"
+
+    [[ "$base" =~ ^([0-9]{14})_([0-9]+)(_[^.]*)?\.mp4$ ]] || {
+        echo "ERROR: filename does not match expected format:" >&2
+        echo "       $base" >&2
+        return 1
+    }
+
+    PARSED_START="${BASH_REMATCH[1]}"
+    PARSED_DECLARED="${BASH_REMATCH[2]}"
+}
+
+timestamp_to_epoch() {
+    local ts="$1"
+
+    date -d "${ts:0:4}-${ts:4:2}-${ts:6:2} ${ts:8:2}:${ts:10:2}:${ts:12:2}" +%s
+}
+
+# Format seconds into a human-readable duration.
+#
+# Examples:
+#   12        -> 12s
+#   95        -> 1m 35s
+#   1595      -> 26m 35s
+#   3725      -> 1h 2m 5s
+format_duration() {
+    local total="$1"
+
+    awk -v total="$total" '
+        BEGIN {
+            total = int(total + 0.5)
+
+            hours = int(total / 3600)
+            minutes = int((total % 3600) / 60)
+            seconds = total % 60
+
+            if (hours > 0)
+                printf "%dh %dm %ds", hours, minutes, seconds
+            else if (minutes > 0)
+                printf "%dm %ds", minutes, seconds
+            else
+                printf "%ds", seconds
+        }
+    '
+}
+
+# Escape a path for an ffmpeg concat-demuxer list.
+concat_quote() {
+    local s="$1"
+
+    s="${s//\\/\\\\}"
+    s="${s//\'/\'\\\'\'}"
+
+    printf "file '%s'\n" "$s"
+}
+
+# ------------------------------------------------------------
+# FIRST FILE / VIDEO PARAMETERS
+# ------------------------------------------------------------
+
+FIRST="${FILES[0]}"
+
+[[ -f "$FIRST" ]] || die "file not found: $FIRST"
+
+WIDTH="$(
+    ffprobe -v error \
+        -select_streams v:0 \
+        -show_entries stream=width \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$FIRST"
+)"
+
+HEIGHT="$(
+    ffprobe -v error \
+        -select_streams v:0 \
+        -show_entries stream=height \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$FIRST"
+)"
+
+FPS="$(
+    ffprobe -v error \
+        -select_streams v:0 \
+        -show_entries stream=avg_frame_rate \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$FIRST"
+)"
+
+[[ -n "$WIDTH" ]] || die "could not determine video width"
+[[ -n "$HEIGHT" ]] || die "could not determine video height"
+[[ -n "$FPS" ]] || die "could not determine video FPS"
+
+# Detect whether the first file has audio.
+if ffprobe -v error \
+    -select_streams a:0 \
+    -show_entries stream=index \
+    -of csv=p=0 \
+    "$FIRST" 2>/dev/null | grep -q .; then
+    HAS_AUDIO=1
+else
+    HAS_AUDIO=0
+fi
+
+# Font for STOPPED card.
+FONT=""
+if [[ -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf ]]; then
+    FONT="/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+fi
+
+# ------------------------------------------------------------
+# HEADER
+# ------------------------------------------------------------
+
+echo
+echo "============================================================"
+echo " DASHCAM CONCATENATOR"
+echo "============================================================"
+echo
+echo "Files          : $COUNT"
+echo "Resolution     : ${WIDTH}x${HEIGHT}"
+echo "FPS            : $FPS"
+echo "Ignore gap     : ${IGNORE_GAP}s"
+echo "Stop threshold : ${STOP_THRESHOLD}s"
+echo "Stop card      : ${CARD_DURATION}s"
+echo
+echo "Timeline mode  : filename timestamp is master clock"
+echo "Overrun        : TRIM to nominal duration"
+echo "Underrun       : FREEZE last frame"
+echo
+echo "First file:"
+echo "  $(basename "$FIRST")"
+echo
+echo "------------------------------------------------------------"
+
+# ------------------------------------------------------------
+# PROCESS FILES
+# ------------------------------------------------------------
+
+CONCAT_LIST="$WORKDIR/concat.txt"
+: > "$CONCAT_LIST"
+
+for ((i=0; i<COUNT; i++)); do
+
+    FILE="${FILES[$i]}"
+
+    [[ -f "$FILE" ]] || die "file not found: $FILE"
+
+    parse_filename "$FILE"
+
+    START_TEXT="$PARSED_START"
+    DECLARED="$PARSED_DECLARED"
+
+    START_EPOCH="$(timestamp_to_epoch "$START_TEXT")"
+
+    ACTUAL="$(
+        get_video_duration "$FILE"
+    )" || die "could not determine duration: $FILE"
+
+    # _0000 is a special case: use actual media duration.
+    if [[ "$DECLARED" =~ ^0+$ ]]; then
+        NOMINAL="$ACTUAL"
+        SOURCE="actual (_0000)"
+    else
+        NOMINAL="$(awk -v d="$DECLARED" 'BEGIN { printf "%.6f", d }')"
+        SOURCE="filename"
+    fi
+
+    # Actual media end.
+    ACTUAL_END="$(
+        awk -v s="$START_EPOCH" -v d="$ACTUAL" \
+            'BEGIN { printf "%.6f", s + d }'
+    )"
+
+    # Nominal slot end.
+    NOMINAL_END="$(
+        awk -v s="$START_EPOCH" -v d="$NOMINAL" \
+            'BEGIN { printf "%.6f", s + d }'
+    )"
+
+    echo
+    echo "[$((i+1))/$COUNT]"
+    echo "File:"
+    echo "  $(basename "$FILE")"
+    echo
+    echo "Start:"
+    echo "  $START_TEXT"
+    echo
+    echo "Duration:"
+    printf "  filename : %ss\n" "$DECLARED"
+    printf "  actual   : %.6fs\n" "$ACTUAL"
+    printf "  output   : %.6fs\n" "$NOMINAL"
+    printf "  source   : %s\n" "$SOURCE"
+    echo
+    echo "Nominal media end:"
+    echo "  $NOMINAL_END"
+
+    echo
+    echo "Actual media end:"
+    echo "  $ACTUAL_END"
+
+    # --------------------------------------------------------
+    # DETERMINE RELATIONSHIP BETWEEN ACTUAL AND NOMINAL
+    # --------------------------------------------------------
+
+    DURATION_DIFF="$(
+        awk -v a="$ACTUAL" -v n="$NOMINAL" \
+            'BEGIN { printf "%.6f", a - n }'
+    )"
+
+    if awk -v d="$DURATION_DIFF" '
+        BEGIN { exit !(d > 0.0005) }
+    '; then
+
+        echo
+        printf "Overrun       : +%.6fs\n" "$DURATION_DIFF"
+        echo "Action        : TRIM to nominal slot"
+
+    elif awk -v d="$DURATION_DIFF" '
+        BEGIN { exit !(d < -0.0005) }
+    '; then
+
+        MISSING="$(
+            awk -v a="$ACTUAL" -v n="$NOMINAL" \
+                'BEGIN { printf "%.6f", n - a }'
+        )"
+
+        echo
+        printf "Underrun      : %.6fs\n" "$MISSING"
+        echo "Action        : FREEZE last frame to nominal slot"
+
+    else
+
+        echo
+        echo "Duration diff : negligible"
+        echo "Action        : use nominal slot"
+
+    fi
+
+    # --------------------------------------------------------
+    # NORMALIZE CLIP
+    #
+    # IMPORTANT:
+    # tpad is applied BEFORE trim.
+    #
+    # Therefore:
+    #   actual 60.166 -> trim at 60.000
+    #   actual 59.800 -> tpad clone -> trim at 60.000
+    #
+    # This fixes the previous freeze implementation bug.
+    # --------------------------------------------------------
+
+    NORMALIZED="$WORKDIR/segment_$(printf '%05d' "$i").mp4"
+
+    echo
+    echo "Encoding normalized segment..."
+
+    if (( HAS_AUDIO )); then
+
+        ffmpeg -hide_banner -loglevel warning \
+            -i "$FILE" \
+            -filter_complex \
+            "[0:v]scale=${WIDTH}:${HEIGHT}:flags=lanczos,\
+fps=${FPS},\
+format=yuv420p,\
+tpad=stop_mode=clone:stop_duration=${NOMINAL},\
+trim=duration=${NOMINAL},\
+setpts=PTS-STARTPTS[v];\
+[0:a]aresample=48000,\
+apad,\
+atrim=duration=${NOMINAL},\
+asetpts=PTS-STARTPTS[a]" \
+            -map "[v]" \
+            -map "[a]" \
+            -c:v libx264 \
+            -preset "$PRESET" \
+            -crf "$CRF" \
+            -pix_fmt yuv420p \
+            -c:a aac \
+            -b:a 128k \
+            -ar 48000 \
+            -ac 2 \
+            -t "$NOMINAL" \
+            -movflags +faststart \
+            "$NORMALIZED"
+
+    else
+
+        ffmpeg -hide_banner -loglevel warning \
+            -i "$FILE" \
+            -vf \
+            "scale=${WIDTH}:${HEIGHT}:flags=lanczos,\
+fps=${FPS},\
+format=yuv420p,\
+tpad=stop_mode=clone:stop_duration=${NOMINAL},\
+trim=duration=${NOMINAL},\
+setpts=PTS-STARTPTS" \
+            -an \
+            -c:v libx264 \
+            -preset "$PRESET" \
+            -crf "$CRF" \
+            -pix_fmt yuv420p \
+            -t "$NOMINAL" \
+            -movflags +faststart \
+            "$NORMALIZED"
+
+    fi
+
+    concat_quote "$NORMALIZED" >> "$CONCAT_LIST"
+
+    # --------------------------------------------------------
+    # NEXT FILE / GAP ANALYSIS
+    # --------------------------------------------------------
+
+    if (( i + 1 < COUNT )); then
+
+        NEXT_FILE="${FILES[$((i+1))]}"
+
+        parse_filename "$NEXT_FILE"
+
+        NEXT_START_TEXT="$PARSED_START"
+        NEXT_START_EPOCH="$(timestamp_to_epoch "$NEXT_START_TEXT")"
+
+        # The real filename-based gap is measured from the END
+        # OF THE NOMINAL SLOT, not from actual media duration.
+        #
+        # Example:
+        #   current starts 10:36:51
+        #   nominal duration 60s
+        #   next starts    10:37:51
+        #
+        # => gap = 0
+        #
+        # This prevents a 60.166s source file from shifting
+        # the master timeline.
+        FILENAME_GAP="$(
+            awk -v n="$NEXT_START_EPOCH" -v e="$NOMINAL_END" \
+                'BEGIN { printf "%.6f", n - e }'
+        )"
+
+        # Actual time between the end of the source media and
+        # the next filename timestamp. This is informational
+        # and is useful for the STOPPED duration text.
+        ACTUAL_TO_NEXT="$(
+            awk -v n="$NEXT_START_EPOCH" -v e="$ACTUAL_END" \
+                'BEGIN { printf "%.6f", n - e }'
+        )"
+
+        echo
+        echo "Next file:"
+        echo "  $(basename "$NEXT_FILE")"
+
+        printf "Filename gap : %.6fs\n" "$FILENAME_GAP"
+        printf "Actual gap   : %.6fs\n" "$ACTUAL_TO_NEXT"
+
+        # ----------------------------------------------------
+        # LONG STOP
+        # ----------------------------------------------------
+
+        if awk -v g="$FILENAME_GAP" -v t="$STOP_THRESHOLD" '
+            BEGIN { exit !(g > t) }
+        '; then
+
+            STOP_SECONDS="$FILENAME_GAP"
+            STOP_TEXT="$(format_duration "$STOP_SECONDS")"
+
+            echo
+            echo "Long gap detected."
+            echo "Action       : STOPPED card"
+            echo "Message      : STOPPED FOR $STOP_TEXT"
+            echo "Card duration: ${CARD_DURATION}s"
+
+            CARD="$WORKDIR/stop_$(printf '%05d' "$i").mp4"
+
+            if [[ -n "$FONT" ]]; then
+                DRAW_TEXT="drawtext=fontfile=${FONT}:text='STOPPED FOR ${STOP_TEXT}':fontsize=72:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2"
+            else
+                DRAW_TEXT="drawtext=text='STOPPED FOR ${STOP_TEXT}':fontsize=72:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2"
+            fi
+
+            if (( HAS_AUDIO )); then
+
+                ffmpeg -hide_banner -loglevel warning \
+                    -f lavfi \
+                    -i "color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}" \
+                    -f lavfi \
+                    -i "anullsrc=r=48000:cl=stereo" \
+                    -vf "$DRAW_TEXT" \
+                    -t "$CARD_DURATION" \
+                    -map 0:v \
+                    -map 1:a \
+                    -c:v libx264 \
+                    -preset "$PRESET" \
+                    -crf "$CRF" \
+                    -pix_fmt yuv420p \
+                    -c:a aac \
+                    -b:a 128k \
+                    -ar 48000 \
+                    -ac 2 \
+                    -shortest \
+                    -movflags +faststart \
+                    "$CARD"
+
+            else
+
+                ffmpeg -hide_banner -loglevel warning \
+                    -f lavfi \
+                    -i "color=c=black:s=${WIDTH}x${HEIGHT}:r=${FPS}" \
+                    -vf "$DRAW_TEXT" \
+                    -t "$CARD_DURATION" \
+                    -an \
+                    -c:v libx264 \
+                    -preset "$PRESET" \
+                    -crf "$CRF" \
+                    -pix_fmt yuv420p \
+                    -movflags +faststart \
+                    "$CARD"
+
+            fi
+
+            concat_quote "$CARD" >> "$CONCAT_LIST"
+
+        else
+
+            if awk -v g="$FILENAME_GAP" -v t="$IGNORE_GAP" '
+                BEGIN { exit !(g > t) }
+            '; then
+                printf "Short gap     : %.6fs (ignored; slot boundary)\n" "$FILENAME_GAP"
+            else
+                echo "Gap           : negligible"
+            fi
+
+        fi
+
+    fi
+
+done
+
+# ------------------------------------------------------------
+# FINAL CONCATENATION
+# ------------------------------------------------------------
+
+echo
+echo "============================================================"
+echo " Concatenating normalized segments"
+echo "============================================================"
+echo
+echo "Output:"
+echo "  $OUTPUT"
+echo
+
+ffmpeg -hide_banner -loglevel warning \
+    -f concat \
+    -safe 0 \
+    -i "$CONCAT_LIST" \
+    -c copy \
+    -movflags +faststart \
+    "$OUTPUT"
+
+# ------------------------------------------------------------
+# FINAL VERIFICATION
+# ------------------------------------------------------------
+
+echo
+echo "============================================================"
+echo " FINAL OUTPUT"
+echo "============================================================"
+
+FINAL_DURATION="$(
+    ffprobe -v error \
+        -show_entries format=duration \
+        -of default=noprint_wrappers=1:nokey=1 \
+        "$OUTPUT"
+)"
+
+FINAL_SIZE="$(du -h "$OUTPUT" | cut -f1)"
+
+echo
+printf "Duration : %.6fs\n" "$FINAL_DURATION"
+echo "Size     : $FINAL_SIZE"
+echo
+echo "Done."
+echo
+

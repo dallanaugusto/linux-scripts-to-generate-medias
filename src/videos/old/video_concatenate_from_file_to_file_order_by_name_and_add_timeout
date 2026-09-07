@@ -1,0 +1,57 @@
+#!/bin/bash
+
+SOURCE_DIR=$1
+FIRST_SOURCE_FILE=$2
+LAST_SOURCE_FILE=$3
+TARGET_FILE=$4
+BLACK_SCREEN_FILE_PATH=$5
+BLACK_SCREEN_FILE_DURATION=$6
+TOTAL_TIMEOUT=$7
+
+TEMP_FILE_LIST="/tmp/$(date +'%Y%m%d%H%M%S')_video_list.txt"
+TEMP_FINAL_FILE_LIST="/tmp/$(date +'%Y%m%d%H%M%S')_final_video_list.txt"
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_SOURCE_DIR=$(realpath "${SOURCE_DIR}")
+ABSOLUTE_FIRST_SOURCE_FILE=$(realpath "${FIRST_SOURCE_FILE}")
+ABSOLUTE_LAST_SOURCE_FILE=$(realpath "${LAST_SOURCE_FILE}")
+ABSOLUTE_TARGET_FILE=$(realpath "${TARGET_FILE}")
+ABSOLUTE_TEMP_FILE_LIST=$(realpath "${TEMP_FILE_LIST}")
+ABSOLUTE_TEMP_FINAL_FILE_LIST=$(realpath "${TEMP_FINAL_FILE_LIST}")
+
+cd "${ABSOLUTE_SOURCE_DIR}"
+ls -1 | xargs realpath | sed -n '/'"$FIRST_SOURCE_FILE"'$/,/'"$LAST_SOURCE_FILE"'$/p' | awk '{print "file \x27"$0"\x27"}' > "${ABSOLUTE_TEMP_FILE_LIST}"
+
+NUM_OF_FILES=$(wc -l < ${ABSOLUTE_TEMP_FILE_LIST})
+echo ${NUM_OF_FILES}
+
+FACTOR=0.84
+BLACK_SCREEN_COUNT=$(echo "scale=4; $TOTAL_TIMEOUT *$FACTOR / $BLACK_SCREEN_FILE_DURATION" | bc)
+echo ${BLACK_SCREEN_COUNT}
+BLACK_SCREEN_INTERVAL=$(echo "scale=4; $NUM_OF_FILES / $BLACK_SCREEN_COUNT" | bc)
+echo ${BLACK_SCREEN_INTERVAL}
+
+file="${ABSOLUTE_TEMP_FILE_LIST}"
+
+echo "" > ${ABSOLUTE_TEMP_FINAL_FILE_LIST}
+
+INDEX=0
+LIMIT=$BLACK_SCREEN_INTERVAL
+COUNT=0
+while IFS= read -r LINE; do
+    echo ${LINE} >> "${ABSOLUTE_TEMP_FINAL_FILE_LIST}"
+    if (( $(echo "$INDEX >= $LIMIT" | bc -l) )); then
+      echo "file '${BLACK_SCREEN_FILE_PATH}'" >> "${ABSOLUTE_TEMP_FINAL_FILE_LIST}"
+      LIMIT=$(echo "$LIMIT + $BLACK_SCREEN_INTERVAL" | bc)
+      (( COUNT++ ))
+    fi
+      
+    ((INDEX++))
+done < "$file"
+
+#cat ${ABSOLUTE_TEMP_FINAL_FILE_LIST}
+echo "COUNT=$COUNT"
+
+cd "${CURRENT_DIR}"
+ffmpeg -f concat -safe 0 -i "${ABSOLUTE_TEMP_FINAL_FILE_LIST}" -c copy "${ABSOLUTE_TARGET_FILE}"
+

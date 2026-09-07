@@ -1,0 +1,30 @@
+#!/bin/bash
+
+#files=`ls $1 | grep "jpg\|JPG"`
+
+#for i in $files; do
+#	convert -resize 640x480 $1/$i $2/$i
+#done
+
+SAVEIFS=$IFS
+IFS=$'\n'
+
+recursive() {
+	if [ -d $1 ]; then
+	    for d in `ls $1`; do
+	        nome=`echo $d | sed 's/ //g' | sed 's/(//g' | sed 's/)//g'`
+	        if [ ! $d == $nome ]; then
+	            mv $1$d $1$nome
+	        fi
+	        echo $1$nome 
+	        if [ -d $1$d/ ]; then
+      	        (recursive $1$d/ $2$d/);
+      	    fi
+	    done
+	fi
+}
+
+recursive $1 $2;
+
+# restore $IFS
+IFS=$SAVEIFS

@@ -1,0 +1,33 @@
+#!/bin/sh
+ 
+ 
+lugar=`kdialog --getexistingdirectory $USER`
+files=`ls $lugar |grep "jpg\|JPG"`
+numfiles=`ls $lugar |grep "jpg\|JPG" |wc -l`
+numprog=1
+if [ -z $files ]; then
+ 
+kdialog --error "Nenhuma foto foi redimensionada"
+exit;
+ 
+fi
+ 
+if [ ! -d $lugar/fotos_redimensionadas ]; then
+mkdir $lugar/fotos_redimensionadas;
+fi
+ 
+ 
+prog=`kdialog --progressbar "Preparando-se para redimensionar" 
+$numfiles`
+ 
+for i in $files; do
+ 
+convert -resize 800x600 $lugar/$i $lugar/fotos_redimensionadas/novo_$i 
+2>> /tmp/convert.erros
+dcop $prog setProgress $numprog
+dcop $prog setLabel "Modificando a foto $i"
+numprog=$((numprog+1))
+echo "Foto $i redimensinada";
+done
+dcop $prog close
+kdialog --msgbox "$numfiles Fotos redimensionadas!!"

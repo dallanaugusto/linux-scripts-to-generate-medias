@@ -1,0 +1,17 @@
+#!/bin/bash
+
+BACKGROUND_VIDEO=$1
+OVERLAY_VIDEO=$2
+OUTPUT_VIDEO=$3
+OVERLAY_VIDEO_HEIGHT=$4
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_BACKGROUND_VIDEO=$(realpath "${BACKGROUND_VIDEO}")
+ABSOLUTE_OVERLAY_VIDEO=$(realpath "${OVERLAY_VIDEO}")
+ABSOLUTE_OUTPUT_VIDEO=$(realpath "${OUTPUT_VIDEO}")
+
+ffmpeg -i ${ABSOLUTE_BACKGROUND_VIDEO} -i ${ABSOLUTE_OVERLAY_VIDEO} -filter_complex "[1:v]scale=${OVERLAY_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10" -crf 26.5 -c:a copy ${ABSOLUTE_OUTPUT_VIDEO}
+
+#ffmpeg -i ${ABSOLUTE_BACKGROUND_VIDEO} -i ${ABSOLUTE_OVERLAY_VIDEO} -filter_complex "[0:v]fps=30[main_v];[1:v]fps=30[overlay_v];[main_v][overlay_v]overlay=x=10:y=10[out]" -map "[out]" -map 0:a? ${ABSOLUTE_OUTPUT_VIDEO}
+
+#ffmpeg -i ${ABSOLUTE_BACKGROUND_VIDEO} -i ${ABSOLUTE_OVERLAY_VIDEO} -filter_complex "[1:v]scale=-1:240[ovrl];[0:v][ovrl]overlay=x=10:y=10[out]" -map "[out]" -r 30 ${ABSOLUTE_OUTPUT_VIDEO}

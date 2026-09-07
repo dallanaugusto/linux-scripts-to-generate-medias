@@ -1,0 +1,55 @@
+#!/bin/bash
+
+#files=`ls $1 | grep "jpg\|JPG"`
+
+#for i in $files; do
+#	convert -resize 1280x960 $1/$i $2/$i
+#done
+
+SAVEIFS=$IFS
+IFS=$'\n'
+
+date=`date +%s`
+
+recursive() {
+    actualDate=`date +%s`
+    seconds=`expr $actualDate - $date`
+    echo "Passed $seconds seconds..."
+	if [ -d $1 ]; then
+	    if [ ! -e $2 ]; then
+	        mkdir $2
+	    fi
+	    for d in `ls $1`; do
+    	    if [ -d $1$d/ ]; then
+      	        (recursive $1$d/ $2$d/);
+      	    elif [ ! -e $2$d ]; then
+			    if [[ $d == *.JPG ]] || [[ $d == *.jpg ]]; then
+				    width=`identify $1$d | awk '{print $3 }' | awk -Fx '{print $1}'`
+				    height=`identify $1$d | awk '{print $3 }' | awk -Fx '{print $2}'`
+				    if [ $width -gt $height ]; then
+				        if [ $width -gt 2047 ]; then
+				            resolution="2048x"
+				        else
+				            resolution="1280x"
+				        fi
+                    else
+				        if [ $height -gt 2048 ]; then
+				            resolution="x2048"
+				        else
+				            resolution="x1280"
+				        fi
+                    fi
+				    echo "Converting $d from $width x $height to $resolution..."
+				    convert -resize $resolution $1$d $2$d
+			    else
+			        cp -p $1$d $2$d    
+			    fi		
+			fi
+	  	done
+	fi
+}
+
+recursive $1 $2;
+
+# restore $IFS
+IFS=$SAVEIFS

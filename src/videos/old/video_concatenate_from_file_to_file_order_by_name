@@ -1,0 +1,21 @@
+#!/bin/bash
+
+SOURCE_DIR=$1
+FIRST_SOURCE_FILE=$2
+LAST_SOURCE_FILE=$3
+TARGET_FILE=$4
+TEMP_FILE_LIST="/tmp/$(date +'%Y%m%d%H%M%S')_video_list.txt"
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_SOURCE_DIR=$(realpath "${SOURCE_DIR}")
+ABSOLUTE_FIRST_SOURCE_FILE=$(realpath "${FIRST_SOURCE_FILE}")
+ABSOLUTE_LAST_SOURCE_FILE=$(realpath "${LAST_SOURCE_FILE}")
+ABSOLUTE_TARGET_FILE=$(realpath "${TARGET_FILE}")
+ABSOLUTE_TEMP_FILE_LIST=$(realpath "${TEMP_FILE_LIST}")
+
+cd "${ABSOLUTE_SOURCE_DIR}"
+ls -1 | xargs realpath | sed -n '/'"$FIRST_SOURCE_FILE"'$/,/'"$LAST_SOURCE_FILE"'$/p' | awk '{print "file \x27"$0"\x27"}' > "${ABSOLUTE_TEMP_FILE_LIST}"
+#cat "${ABSOLUTE_TEMP_FILE_LIST}"
+cd "${CURRENT_DIR}"
+ffmpeg -f concat -safe 0 -i "${ABSOLUTE_TEMP_FILE_LIST}" -c copy "${ABSOLUTE_TARGET_FILE}"
+

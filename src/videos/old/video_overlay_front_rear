@@ -1,0 +1,52 @@
+#!/bin/bash
+
+BEGINNING=$(date)
+
+FRONT_VIDEO=$1
+REAR_VIDEO=$2
+OUTPUT_VIDEO=$3
+REAR_VIDEO_HEIGHT=$4
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_FRONT_VIDEO=$(realpath "${FRONT_VIDEO}")
+ABSOLUTE_REAR_VIDEO=$(realpath "${REAR_VIDEO}")
+ABSOLUTE_OUTPUT_VIDEO=$(realpath "${OUTPUT_VIDEO}")
+
+echo "ABSOLUTE_FRONT_VIDEO=${ABSOLUTE_FRONT_VIDEO}"
+echo "ABSOLUTE_REAR_VIDEO=${ABSOLUTE_REAR_VIDEO}"
+echo "ABSOLUTE_OUTPUT_VIDEO=${ABSOLUTE_OUTPUT_VIDEO}"
+
+
+#ffmpeg -i ${ABSOLUTE_FRONT_VIDEO} -i ${ABSOLUTE_REAR_VIDEO} -filter_complex "[1:v]scale=${REAR_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10" -c:v h264_vaapi -b:v 3M -c:a copy ${ABSOLUTE_OUTPUT_VIDEO}
+
+#ffmpeg -i ${ABSOLUTE_FRONT_VIDEO} -i ${ABSOLUTE_REAR_VIDEO} \
+#-filter_complex "[1:v]scale=${REAR_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10,format=nv12,hwupload" \
+#-vaapi_device /dev/dri/renderD128 \
+#-c:v h264_vaapi -qp 30 -c:a copy ${ABSOLUTE_OUTPUT_VIDEO}
+
+
+
+#ffmpeg -i ${ABSOLUTE_FRONT_VIDEO} -i ${ABSOLUTE_REAR_VIDEO} \
+#-filter_complex "[1:v]scale=${REAR_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10,format=yuv420p" \
+#-c:v libx264 -preset medium -crf 23 -profile:v high -level 4.1 \
+#-pix_fmt yuv420p \
+#-movflags +faststart \
+#-c:a aac -b:a 192k \
+#${ABSOLUTE_OUTPUT_VIDEO%.mp4}.mp4
+
+
+
+
+ffmpeg -vaapi_device /dev/dri/renderD128 \
+-i ${ABSOLUTE_FRONT_VIDEO} -i ${ABSOLUTE_REAR_VIDEO} \
+-filter_complex "[1:v]scale=${REAR_VIDEO_HEIGHT}:-1[top];[0:v][top]overlay=x=main_w-overlay_w-10:y=10,format=nv12,hwupload" \
+-c:v h264_vaapi -profile:v high -level 4.1 -qp 30 \
+-pix_fmt nv12 \
+-movflags +faststart \
+-c:a aac -b:a 192k \
+${ABSOLUTE_OUTPUT_VIDEO%.mp4}.mp4
+
+
+
+END=$(date)
+echo "From ${BEGINNING} to ${END}..."

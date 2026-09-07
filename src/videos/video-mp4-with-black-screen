@@ -1,0 +1,7 @@
+#!/bin/bash
+
+RESOLUTION=$1
+DURATION=$2
+OUTPUT_MP4_FILE=$3
+
+ffmpeg -f lavfi -i color=c=black:s=${RESOLUTION}:d=${DURATION} -c:v libx264 -t ${DURATION} ${OUTPUT_MP4_FILE}

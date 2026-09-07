@@ -1,0 +1,20 @@
+#!/bin/bash
+
+SOURCE_DIR=$1
+TARGET_FILE=$2
+RULE=$3
+TEMP_FILE_LIST="/tmp/videos_list.txt"
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_SOURCE_DIR=$(realpath "${SOURCE_DIR}")
+ABSOLUTE_TARGET_FILE=$(realpath "${TARGET_FILE}")
+ABSOLUTE_TEMP_FILE_LIST=$(realpath "${TEMP_FILE_LIST}")
+
+cd "${ABSOLUTE_SOURCE_DIR}"
+printf "file '${ABSOLUTE_SOURCE_DIR}/%s'\n" $RULE > "${ABSOLUTE_TEMP_FILE_LIST}"
+cd "${CURRENT_DIR}"
+ffmpeg -f concat -safe 0 -i "${ABSOLUTE_TEMP_FILE_LIST}" -c copy "${ABSOLUTE_TARGET_FILE}"
+
+
+#  > printf "file '%s'\n" ./*.mp4  > ${TARGET_FILE}
+# ffmpeg -f concat -safe 0 -i ~/Área\ de\ trabalho/rear.txt -c copy ~/Área\ de\ trabalho/rear.mp4

@@ -1,0 +1,8 @@
+#!/bin/bash
+
+for i in *.mp4; do
+	if [ -e "$i" ]; then
+   		file=`basename "$i" .mp4`
+		ffmpeg -i $i "$file.avi"
+	fi
+done

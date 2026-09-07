@@ -1,0 +1,13 @@
+#!/bin/bash
+
+INPUT_VIDEO=$1
+OUTPUT_VIDEO=$2
+FROM=$3
+TO=$4
+
+CURRENT_DIR="$(pwd)"
+ABSOLUTE_INPUT_VIDEO=$(realpath "${INPUT_VIDEO}")
+ABSOLUTE_OUTPUT_VIDEO=$(realpath "${OUTPUT_VIDEO}")
+
+ffmpeg -i ${ABSOLUTE_INPUT_VIDEO} -ss ${FROM} -to ${TO} -c copy ${ABSOLUTE_OUTPUT_VIDEO}
+
